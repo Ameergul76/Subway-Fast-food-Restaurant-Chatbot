@@ -1,0 +1,35 @@
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime
+from sqlalchemy.orm import relationship
+from datetime import datetime
+from .database import Base
+
+class Menu(Base):
+    __tablename__ = "menu"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item = Column(String, index=True)
+    category = Column(String)
+    price = Column(Float)
+    description = Column(String)
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_details = Column(String) # JSON or simple string for MVP
+    total_amount = Column(Float, default=0.0)
+    order_status = Column(String, default="Pending") # Pending, Preparing, Ready, Completed, Cancelled
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    items = relationship("OrderItem", back_populates="order")
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"))
+    item_id = Column(Integer, ForeignKey("menu.id"))
+    quantity = Column(Integer, default=1)
+
+    order = relationship("Order", back_populates="items")
+    menu_item = relationship("Menu")
