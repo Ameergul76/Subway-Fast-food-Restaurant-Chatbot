@@ -1,152 +1,283 @@
 from sqlalchemy.orm import Session
-from . import crud, schemas
+from sqlalchemy import func
+from . import crud, schemas, models
 import re
+from rapidfuzz import fuzz, process
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+import google.generativeai as genai
+import time
+import logging
 
-def process_chat_message(message: str, db: Session):
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Load .env from backend directory
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
+# Configure Gemini API
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    logger.error("GOOGLE_API_KEY not found in environment variables")
+
+genai.configure(api_key=GOOGLE_API_KEY)
+
+# Initialize Gemini model
+# Using 1.5 Flash for better stability
+gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+
+# In-memory history storage
+conversation_history = {}
+
+def get_local_fallback_response(message: str, menu_items):
+    """
+    Fallback ONLY when API is dead.
+    User explicitly requested NO hardcoded answers.
+    So we just give an error message.
+    """
+    return "⏳ API Quota Exceeded. The AI is tired and cannot chat right now. Please wait a minute and try again."
+
+def query_gemini_llm(system_prompt, user_message, menu_items, retries=3, delay=2):
+    """Query Google Gemini for AI responses with retry logic"""
+    for attempt in range(retries):
+        try:
+            response = gemini_model.generate_content(system_prompt)
+            return response.text
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Gemini API Error (Attempt {attempt+1}/{retries}): {error_msg}")
+            
+            if "429" in error_msg or "Resource has been exhausted" in error_msg or "quota" in error_msg.lower():
+                # Exponential backoff
+                if attempt < retries - 1:
+                    sleep_time = delay * (2 ** attempt)
+                    time.sleep(sleep_time)
+                    continue
+                
+                return get_local_fallback_response(user_message, menu_items)
+            
+            # Other errors
+            if attempt < retries - 1:
+                 time.sleep(delay)
+                 continue
+                 
+    return get_local_fallback_response(user_message, menu_items)
+
+def find_menu_items_fuzzy(message: str, menu_items, threshold=70):
+    """
+    Find menu items using fuzzy string matching.
+    Returns list of matched items with their scores.
+    """
     message_lower = message.lower()
+    matched_items = []
     
-    # Greeting detection (use word boundaries to avoid false matches)
-    greetings = ["hello", "hey", "good morning", "good afternoon", "good evening"]
-    # Check for "hi" as a standalone word
-    if any(greeting in message_lower for greeting in greetings) or re.search(r'\bhi\b', message_lower):
-        return "Hello! Welcome to our restaurant! 🍕\n\nI can help you with:\n- View our menu (say 'menu' or 'show menu')\n- Place an order (say 'order pizza' or 'I want chicken')\n- Check categories (say 'show pizzas' or 'what desserts do you have')\n\nWhat would you like to do?"
+    for item in menu_items:
+        item_name_lower = item.item.lower()
+        
+        # Direct substring match
+        if item_name_lower in message_lower:
+            matched_items.append((item, 100))
+            continue
+        
+        # Fuzzy match on full name
+        score = fuzz.partial_ratio(item_name_lower, message_lower)
+        if score >= threshold:
+            matched_items.append((item, score))
+            continue
+        
+        # Check individual words
+        for word in item_name_lower.split():
+            if len(word) > 3:  # Only check words longer than 3 chars
+                word_score = fuzz.ratio(word, message_lower)
+                if word_score >= threshold:
+                    matched_items.append((item, word_score))
+                    break
     
-    # Help detection
-    if "help" in message_lower:
-        return "I'm here to help! 😊\n\nYou can:\n- Say 'menu' to see all items\n- Say 'order [item name]' to place an order\n- Say 'show [category]' to see items by category\n- Ask about specific items like 'tell me about pizza'\n\nWhat would you like to do?"
+    # Sort by score descending and remove duplicates
+    seen = set()
+    unique_matches = []
+    for item, score in sorted(matched_items, key=lambda x: x[1], reverse=True):
+        if item.id not in seen:
+            seen.add(item.id)
+            unique_matches.append((item, score))
     
-    # Menu display - broader detection
-    if any(word in message_lower for word in ["menu", "list", "show all", "what do you have", "what's available", "items"]):
-        menu_items = crud.get_menu(db)
-        if not menu_items:
-            return "The menu is currently empty."
-        
-        # Group by category
-        categories = {}
-        for item in menu_items:
-            if item.category not in categories:
-                categories[item.category] = []
-            categories[item.category].append(item)
-        
-        response = "🍽️ **Our Menu**\n\n"
-        for category, items in categories.items():
-            response += f"**{category}:**\n"
-            for item in items:
-                response += f"  • {item.item} - ${item.price:.2f}\n    {item.description}\n"
-            response += "\n"
-        
-        response += "To order, just say 'order [item name]' or 'I want [item name]'!"
-        return response
-    
-    # Order detection - much broader (CHECK THIS FIRST before category browsing)
-    order_keywords = ["order", "buy", "want", "get", "purchase", "i'll have", "i'd like", "can i get", "give me"]
-    if any(keyword in message_lower for keyword in order_keywords):
-        menu_items = crud.get_menu(db)
-        found_items = []
-        
-        # Try to find menu items mentioned in the message
-        for item in menu_items:
-            item_name_lower = item.item.lower()
-            # Check for full name or partial matches
-            if item_name_lower in message_lower or any(word in message_lower for word in item_name_lower.split()):
-                found_items.append(item)
-        
-        if found_items:
-            # Create an actual order
-            try:
-                # Extract quantity if mentioned
-                quantity = 1
-                quantity_match = re.search(r'(\d+)\s*(?:x|of|pieces?)?', message_lower)
-                if quantity_match:
-                    quantity = int(quantity_match.group(1))
-                
-                # Use the first found item
-                item = found_items[0]
-                
-                # Create order
-                order_items = [schemas.OrderItemCreate(item_id=item.id, quantity=quantity)]
-                order_data = schemas.OrderCreate(
-                    user_details="Chat Customer",
-                    items=order_items
-                )
-                
-                order = crud.create_order(db=db, order=order_data)
-                
-                response = f"✅ **Order Placed Successfully!**\n\n"
-                response += f"Order #{order.id}\n"
-                response += f"• {quantity}x {item.item} - ${item.price * quantity:.2f}\n"
-                response += f"**Total: ${order.total_amount:.2f}**\n\n"
-                response += f"Your order is being prepared! You can check the status on the dashboard."
-                
-                return response
-                
-            except Exception as e:
-                return f"Sorry, I had trouble placing your order. Error: {str(e)}"
-        else:
-            # Suggest items
-            return "I'd love to help you order! Could you tell me which item you'd like? Say 'menu' to see all available items, or try saying 'order pizza' or 'I want chicken sandwich'."
-    
-    # Category-specific queries (only if not ordering)
-    categories_keywords = {
-        "pizza": ["pizza", "pizzas"],
-        "pasta": ["pasta", "spaghetti", "noodles"],
-        "salad": ["salad", "salads"],
-        "sandwich": ["sandwich", "sandwiches", "burger"],
-        "sides": ["sides", "side", "fries"],
-        "dessert": ["dessert", "desserts", "sweet", "cake"],
-        "beverage": ["beverage", "drink", "drinks", "soda"]
+    return unique_matches
+
+def extract_quantities(message: str):
+    """
+    Extract quantities from message.
+    Returns dict of {position: quantity}
+    """
+    quantities = {}
+    # Match patterns like "2 pizzas", "3x burger", "five salads"
+    number_words = {
+        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10
     }
     
-    # Check if asking about a category (not ordering)
-    if any(word in message_lower for word in ["show", "what", "list", "see", "have"]):
-        for category, keywords in categories_keywords.items():
-            if any(keyword in message_lower for keyword in keywords):
-                menu_items = crud.get_menu(db)
-                category_items = [item for item in menu_items if item.category.lower() == category]
+    # Find numeric quantities
+    for match in re.finditer(r'(\d+)\s*(?:x|of|pieces?)?', message.lower()):
+        quantities[match.start()] = int(match.group(1))
+    
+    # Find word quantities
+    for word, num in number_words.items():
+        if word in message.lower():
+            pos = message.lower().find(word)
+            quantities[pos] = num
+    
+    return quantities
+
+def parse_multi_item_order(message: str, menu_items):
+    """
+    Parse message for multiple items and quantities.
+    Returns list of (item, quantity) tuples.
+    """
+    message_lower = message.lower()
+    order_items = []
+    
+    # Split by common separators
+    separators = [' and ', ' & ', ', ', ' plus ', ' with ']
+    parts = [message_lower]
+    
+    for sep in separators:
+        new_parts = []
+        for part in parts:
+            new_parts.extend(part.split(sep))
+        parts = new_parts
+    
+    # Extract quantities
+    quantities = extract_quantities(message)
+    
+    # Try to match each part to menu items
+    for part in parts:
+        part = part.strip()
+        if len(part) < 3:
+            continue
+        
+        matches = find_menu_items_fuzzy(part, menu_items, threshold=60)
+        if matches:
+            item = matches[0][0]  # Best match
+            
+            # Find quantity for this item
+            quantity = 1
+            for pos, qty in quantities.items():
+                # Check if quantity appears near the item mention
+                if pos < len(message) and abs(message.lower().find(part) - pos) < 20:
+                    quantity = qty
+                    break
+            
+            order_items.append((item, quantity))
+    
+    return order_items
+
+def process_chat_message(message: str, db: Session, session_id: str = "default"):
+    message_lower = message.lower()
+    
+    # --- ACTION DETECTION (Deterministic Logic for Orders) ---
+    order_keywords = ["order", "buy", "want", "get", "purchase", "i'll have", "i'd like", "can i get", "give me", "i need"]
+    if any(re.search(r'\b' + re.escape(keyword) + r'\b', message_lower) for keyword in order_keywords):
+        menu_items = crud.get_menu(db)
+        
+        # Try multi-item parsing
+        order_items = parse_multi_item_order(message, menu_items)
+        
+        if not order_items:
+            matches = find_menu_items_fuzzy(message, menu_items, threshold=65)
+            if matches:
+                 item = matches[0][0]
+                 quantity = 1
+                 qty_match = re.search(r'(\d+)', message_lower)
+                 if qty_match:
+                     quantity = int(qty_match.group(1))
+                 order_items = [(item, quantity)]
+
+        if order_items:
+            try:
+                # Create order
+                order_item_schemas = []
+                for item, qty in order_items:
+                    order_item_schemas.append(schemas.OrderItemCreate(item_id=item.id, quantity=qty))
                 
-                if category_items:
-                    response = f"🍽️ **{category.title()} Menu:**\n\n"
-                    for item in category_items:
-                        response += f"• {item.item} - ${item.price:.2f}\n  {item.description}\n\n"
-                    response += f"To order, say 'order {category_items[0].item}' or 'I want {category_items[0].item}'!"
-                    return response
-                else:
-                    return f"Sorry, we don't have any {category} items right now."
-    
-    # Price inquiry
-    if "price" in message_lower or "cost" in message_lower or "how much" in message_lower:
-        menu_items = crud.get_menu(db)
-        for item in menu_items:
-            if item.item.lower() in message_lower:
-                return f"The {item.item} costs ${item.price:.2f}. Would you like to order it?"
-        return "Which item would you like to know the price of? Say 'menu' to see all items and prices."
-    
-    # Item description inquiry
-    if any(word in message_lower for word in ["tell me about", "what is", "describe", "info about", "information"]):
-        menu_items = crud.get_menu(db)
-        for item in menu_items:
-            if item.item.lower() in message_lower:
-                return f"**{item.item}** (${item.price:.2f})\n{item.description}\n\nWould you like to order it? Just say 'order {item.item}'!"
-        return "Which item would you like to know about? Say 'menu' to see all available items."
-    
-    # Status check
+                order_data = schemas.OrderCreate(
+                    user_details="Chat Customer",
+                    items=order_item_schemas
+                )
+                order = crud.create_order(db=db, order=order_data)
+                
+                response = f"✅ **Order Placed Successfully!**\n\nOrder #{order.id}\n"
+                for item, qty in order_items:
+                    response += f"• {qty}x {item.item} - ${item.price * qty:.2f}\n"
+                response += f"\n**Total: ${order.total_amount:.2f}**\n\nYour food is on the way! 🚀"
+                return response
+            except Exception as e:
+                logger.error(f"Order error: {e}")
+                return "I tried to place that order but ran into a system error. Please try again or contact support."
+
+    # 2. Status Check
     if "status" in message_lower or "track" in message_lower or "my order" in message_lower:
         orders = crud.get_orders(db, limit=5)
         if orders:
             response = "📋 **Recent Orders:**\n\n"
             for order in orders[:3]:
-                response += f"Order #{order.id} - {order.order_status}\n"
-                response += f"Total: ${order.total_amount:.2f}\n\n"
+                response += f"Order #{order.id} - {order.order_status}\nTotal: ${order.total_amount:.2f}\n\n"
             return response
-        return "You don't have any recent orders. Would you like to place one? Say 'menu' to see what we have!"
+
+    # --- LLM HANDLING (Pure AI) ---
     
-    # Thank you
-    if "thank" in message_lower or "thanks" in message_lower:
-        return "You're welcome! 😊 Is there anything else I can help you with?"
+    menu_items = crud.get_menu(db)
     
-    # Goodbye
-    if any(word in message_lower for word in ["bye", "goodbye", "see you", "later"]):
-        return "Goodbye! Thanks for visiting our restaurant. Come back soon! 👋"
+    # 1. Build Menu Context
+    menu_context = "current_menu = [\n"
+    for item in menu_items:
+        menu_context += f"  {{'name': '{item.item}', 'price': {item.price}, 'category': '{item.category}', 'description': '{item.description}'}},\n"
+    menu_context += "]"
+
+    # 2. History Management
+    if session_id not in conversation_history:
+        conversation_history[session_id] = []
     
-    # Default response - more helpful
-    return "I'm not sure I understood that. 🤔\n\nI can help you:\n- View the menu (say 'menu')\n- Order food (say 'order pizza' or 'I want salad')\n- Check prices (say 'how much is the pizza')\n- Get info about items (say 'tell me about the chicken sandwich')\n\nWhat would you like to do?"
+    if len(conversation_history[session_id]) > 20:
+        conversation_history[session_id] = conversation_history[session_id][-10:]
+
+    history_text = "\n".join([f"{role}: {text}" for role, text in conversation_history[session_id]])
+
+    # 3. System Prompt - Injected Knowledge
+    system_prompt = f"""
+You are the official AI assistant for **Subway Fast Food**.
+
+**RESTAURANT DETAILS (Memorize this)**:
+- **Name**: Subway Fast Food
+- **Owner**: Ameer Gul (03151095812)
+- **Address**: Gulshan-e-Mazdoor, Karachi, Pakistan
+- **Opening Hours**: Open 7 days a week.
+
+**MENU DATA**:
+{menu_context}
+
+**YOUR JOB**:
+- Answer questions by looking at the RESTAURANT DETAILS and MENU DATA.
+- If asking for "Owner", say "Ameer Gul".
+- If asking for "Price", look up the item in MENU DATA.
+- Guide users to order by saying "I want [Item]".
+- Be friendly, polite, and use emojis 🍕.
+
+**CONVERSATION HISTORY**:
+{history_text}
+
+**USER MESSAGE**:
+{message}
+
+**RESPONSE**:
+"""
+    
+    # Call LLM
+    llm_response = query_gemini_llm(system_prompt, message, menu_items)
+    
+    # Update History
+    conversation_history[session_id].append(("User", message))
+    conversation_history[session_id].append(("Assistant", llm_response))
+    
+    return llm_response

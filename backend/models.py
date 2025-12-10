@@ -12,6 +12,12 @@ class Menu(Base):
     price = Column(Float)
     description = Column(String)
 
+class Category(Base):
+    __tablename__ = "categories"
+
+    name = Column(String, primary_key=True, index=True)
+    image_url = Column(String)
+
 class Order(Base):
     __tablename__ = "orders"
 

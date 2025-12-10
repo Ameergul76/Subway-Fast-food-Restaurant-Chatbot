@@ -1,5 +1,9 @@
 fastapi
 uvicorn
 sqlalchemy
+rapidfuzz
 pydantic
 python-multipart
+requests
+python-dotenv
+google-generativeai

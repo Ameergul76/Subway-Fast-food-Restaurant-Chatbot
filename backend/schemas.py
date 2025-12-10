@@ -17,6 +17,17 @@ class Menu(MenuBase):
     
     id: int
 
+# Category Schemas
+class CategoryBase(BaseModel):
+    name: str
+    image_url: str
+
+class CategoryCreate(CategoryBase):
+    pass
+
+class Category(CategoryBase):
+    model_config = ConfigDict(from_attributes=True)
+
 # Order Schemas
 class OrderItemBase(BaseModel):
     item_id: int
