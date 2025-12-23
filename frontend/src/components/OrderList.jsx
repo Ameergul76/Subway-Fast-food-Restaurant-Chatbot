@@ -178,6 +178,7 @@ const OrderList = () => {
                             <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Order ID</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tracking Key</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Items</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
@@ -196,6 +197,7 @@ const OrderList = () => {
                                     filteredOrders.map((order) => (
                                         <tr key={order.id} className="hover:bg-gray-50 transition-colors">
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">#{order.id}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-emerald-600 font-bold">{order.tracking_code || '-'}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{order.user_details}</td>
                                             <td className="px-6 py-4 text-sm text-gray-500">
                                                 {order.items.map(item => (

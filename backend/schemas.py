@@ -28,6 +28,22 @@ class CategoryCreate(CategoryBase):
 class Category(CategoryBase):
     model_config = ConfigDict(from_attributes=True)
 
+# Restaurant Schemas
+class RestaurantBase(BaseModel):
+    name: str
+    owner: str
+    phone: str
+    address: str
+    description: str
+
+class RestaurantCreate(RestaurantBase):
+    pass
+
+class Restaurant(RestaurantBase):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+
 # Order Schemas
 class OrderItemBase(BaseModel):
     item_id: int
@@ -54,6 +70,7 @@ class Order(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     
     id: int
+    tracking_code: Optional[str] = None
     user_details: str
     total_amount: float
     order_status: str

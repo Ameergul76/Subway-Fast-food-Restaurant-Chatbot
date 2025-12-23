@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from . import crud, models, schemas, chatbot
 from .database import engine, SessionLocal
+import logging
 
 # Create tables
 models.Base.metadata.create_all(bind=engine)
@@ -57,6 +58,26 @@ def read_categories(skip: int = 0, limit: int = 100, db: Session = Depends(get_d
 def create_category(category: schemas.CategoryCreate, db: Session = Depends(get_db)):
     return crud.create_category(db=db, category=category)
 
+# Restaurant Info Endpoints
+@app.get("/restaurant-info", response_model=schemas.Restaurant)
+def get_restaurant_info(db: Session = Depends(get_db)):
+    info = crud.get_restaurant_info(db)
+    if not info:
+        # Return default if not found
+        return schemas.Restaurant(
+            id=0,
+            name="Subway Fast Food",
+            owner="Ameer Gul",
+            phone="03151095812",
+            address="Gulshan-e-Mazdoor, Karachi, Pakistan",
+            description="Best fast food in town!"
+        )
+    return info
+
+@app.post("/restaurant-info", response_model=schemas.Restaurant)
+def update_restaurant_info(info: schemas.RestaurantCreate, db: Session = Depends(get_db)):
+    return crud.create_restaurant_info(db=db, info=info)
+
 # Order Endpoints
 @app.post("/orders/", response_model=schemas.Order)
 def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
@@ -95,7 +116,15 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
 
+logger = logging.getLogger("uvicorn.error")
+
 @app.post("/chat/")
 def chat(request: ChatRequest, db: Session = Depends(get_db)):
-    response = chatbot.process_chat_message(request.message, db, request.session_id)
-    return {"response": response}
+    try:
+        logger.debug(f"Received chat request: {request}")
+        response = chatbot.process_chat_message(request.message, db, request.session_id)
+        logger.debug(f"Chat response: {response}")
+        return {"response": response}
+    except Exception as e:
+        logger.error(f"Error processing chat request: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")

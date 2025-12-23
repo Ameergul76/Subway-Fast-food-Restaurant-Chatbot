@@ -34,20 +34,60 @@ def create_category(db: Session, category: schemas.CategoryCreate):
     db.refresh(db_category)
     return db_category
 
+# Restaurant Info CRUD
+def get_restaurant_info(db: Session):
+    return db.query(models.Restaurant).first()
+
+def create_restaurant_info(db: Session, info: schemas.RestaurantCreate):
+    db_info = db.query(models.Restaurant).first()
+    if db_info:
+        # Update existing
+        db_info.name = info.name
+        db_info.owner = info.owner
+        db_info.phone = info.phone
+        db_info.address = info.address
+        db_info.description = info.description
+    else:
+        # Create new
+        db_info = models.Restaurant(**info.dict())
+        db.add(db_info)
+    
+    db.commit()
+    db.refresh(db_info)
+    return db_info
+
+import secrets
+import string
+
+# ... (Menu CRUD)
+# ... (Restaurant CRUD)
+
 # Order CRUD
 def get_orders(db: Session, skip: int = 0, limit: int = 100):
     return db.query(models.Order).options(
         joinedload(models.Order.items).joinedload(models.OrderItem.menu_item)
     ).order_by(models.Order.created_at.desc()).offset(skip).limit(limit).all()
 
+def generate_tracking_code():
+    """Generate a unique 6-character alphanumeric code"""
+    chars = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(chars) for _ in range(6))
+
 def create_order(db: Session, order: schemas.OrderCreate):
     # Calculate total amount
     total_amount = 0.0
     db_items = []
     
+    # Generate unique tracking code
+    code = generate_tracking_code()
+    # Ensure uniqueness (simple check)
+    while db.query(models.Order).filter(models.Order.tracking_code == code).first():
+        code = generate_tracking_code()
+
     # Create Order object first
     db_order = models.Order(
         user_details=order.user_details,
+        tracking_code=code,
         order_status="Pending"
     )
     db.add(db_order)
@@ -72,7 +112,11 @@ def create_order(db: Session, order: schemas.OrderCreate):
     db.refresh(db_order)
     return db_order
 
+def get_order_by_tracking_code(db: Session, tracking_code: str):
+    return db.query(models.Order).filter(models.Order.tracking_code == tracking_code).first()
+
 def update_order_status(db: Session, order_id: int, status: str):
+
     db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if db_order:
         db_order.order_status = status
@@ -119,4 +163,3 @@ def get_order_statistics(db: Session):
         "cancelled": cancelled,
         "total": total
     }
-
